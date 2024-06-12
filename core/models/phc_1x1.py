@@ -1,4 +1,5 @@
 import os
+import sys
 from itertools import product
 from typing import Optional, Tuple
 import matplotlib.pyplot as plt
@@ -13,7 +14,15 @@ import numpy as np
 import torch
 from angler import Simulation
 from pyutils.general import ensure_dir
+import torch.nn as nn
+import meep.adjoint as mpa
+from autograd import numpy as npa
+# Determine the path to the directory containing device.py
+device_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/fdtd'))
 
+# Add the directory to sys.path
+if device_dir not in sys.path:
+    sys.path.append(device_dir)
 from device import Device
 
 eps_sio2 = 1.44**2
@@ -135,21 +144,14 @@ class PhC_1x1(Device):
         self.size = [box_size[0] + port_len * 2, box_size[1]]
 
         # meep definition
-        box = mp.Block(
-            mp.Vector3(box_size[0], box_size[1], mp.inf),
-            center=mp.Vector3(),
-            material=mp.Medium(epsilon=eps_r),
-        )
+        # box is defined as another method too
+        # box = mp.Block(
+        #     mp.Vector3(box_size[0], box_size[1], mp.inf),
+        #     center=mp.Vector3(),
+        #     material=mp.Medium(epsilon=eps_r),
+        # )
         # with open("slots_record.log", "w") as f:
         #     print("this is the slots: ", slots, file=f)
-        etched_holes = [
-            mp.Cylinder(
-                radius=radius,
-                center=mp.Vector3(center_x, center_y),
-                material=mp.Medium(epsilon=eps_bg),
-            )
-            for center_x, center_y, radius in holes
-        ]
         in_ports = [
             get_taper(
                 width_wg1=wg_width[0],
@@ -181,7 +183,7 @@ class PhC_1x1(Device):
             )
             for i in range(num_out_ports)
         ]
-        self.geometry = [box] + in_ports + out_ports + etched_holes
+        self.geometry = in_ports + out_ports
 
         # self.design_region = apply_regions(
         #     [box], self.xs, self.ys, eps_r_list=1, eps_bg=0
@@ -216,6 +218,8 @@ class PhC_1x1(Device):
         fwidth = (
             3 * alpha * (1 / (wl_cen - wl_width / 2) - 1 / (wl_cen + wl_width / 2))
         )  # pulse frequency width
+        self.fcen = fcen
+        self.fwidth = fwidth
         if src_type == "GaussianSource":
             src_fn = mp.GaussianSource
         else:
@@ -246,6 +250,21 @@ class PhC_1x1(Device):
             )
         )
 
+    def update_permittivity(self, permittivity: torch.Tensor, box_size_x: float = 6, box_size_y: float = 5):
+        permittivity = permittivity.detach().numpy()
+        design_region_size = mp.Vector3(box_size_x, box_size_y, 0)
+        medium1 = mp.Medium(epsilon=self.config.device.cfg.eps_bg)
+        medium2 = mp.Medium(epsilon=self.config.device.cfg.eps_r)
+        design_variables = mp.MaterialGrid(
+            mp.Vector3(permittivity.shape[0], permittivity.shape[1]), 
+            medium1, 
+            medium2, 
+            weights=permittivity, 
+            grid_type="U_MEAN"
+        )
+        self.design_region = mpa.DesignRegion(design_variables, volume=mp.Volume(center=mp.Vector3(), size=design_region_size))
+        self.geometry = self.geometry + [mp.Block(center=mp.Vector3(), size=design_region_size, material=design_variables)]
+
     def create_simulation(
         self,
         resolution: int = 10,  # pixels / um
@@ -271,6 +290,7 @@ class PhC_1x1(Device):
             geometry=self.geometry,
             sources=self.sources,
             default_material=mp.Medium(epsilon=self.config.device.cfg.eps_bg),
+            force_all_components=True,
         )
         self.update_simulation_config(
             dict(
@@ -285,6 +305,33 @@ class PhC_1x1(Device):
             )
         )
         return self.sim
+
+    def create_objective(self, out_port_idx: int):
+        te = mpa.EigenmodeCoefficient(
+            self.sim, mp.Volume(center=mp.Vector3(*self.out_port_centers[out_port_idx]), size=mp.Vector3(y=1.2)), mode=1
+        )
+        self.ob_list = [te]
+
+    @staticmethod
+    def J(alpha):
+        return npa.abs(alpha) ** 2
+    
+    def create_optimzation(self):
+        self.opt = mpa.OptimizationProblem(
+            simulation=self.sim,
+            objective_functions=self.J,
+            objective_arguments=self.ob_list,
+            design_regions=self.design_region,
+            fcen=self.fcen,
+            df=0,
+            nf=1,
+            # df=self.fwidth,
+            # nf=20,
+        )
+
+    def obtain_objective_and_gradient(self):
+        f0, grad = self.opt()
+        return f0, grad
 
     def run_sim(
         self,
@@ -380,7 +427,7 @@ class PhC_1x1(Device):
             hf.create_dataset("meta", data=str(self.config))
 
         return output
-
+    
     def resize(self, x, size, mode="bilinear"):
         if not isinstance(x, torch.Tensor):
             y = torch.from_numpy(x)
@@ -458,69 +505,150 @@ class PhC_1x1(Device):
         str = f"Metaline{self.num_in_ports}x{self.num_out_ports}("
         str += f"size = {self.box_size[0]} um x {self.box_size[1]} um)"
         return str
+    
+class Repara_Phc_1x1(nn.Module):
+    ''' this class is used to optimize the PhC_1x1 device
 
+    1. init a latent vector that represents the device
+    2. reparameterize the latent vector to another vector in a differentiable way
+    3. generate the permittivity from the latent vector
+    4. calculate the transmittion efficiency of the device as the optimization objective
+    5. use the adjoint method to calculate the gradient of the objective w.r.t. the permittivity
+    6. calculate the gradient of the objective w.r.t. the latent vector
+    7. optimize the latent vector using the gradient
+    '''
+    def __init__(
+            self, 
+            device_cfg, 
+            sim_cfg
+        ):
+        super(Repara_Phc_1x1, self).__init__()
+        self.device_cfg = device_cfg
+        self.a = torch.tensor(1.0)
+        self.box_size = nn.Parameter(torch.tensor([5.0, 5.0]))
+        self.num_rows_perside = 6
+        self.num_cols = 8
+        self.init_parameters()
+        self.sim_cfg = sim_cfg
+        self.resolution = sim_cfg["resolution"]
 
-def phc_1x1_random(random_seed=0, radius=1, a=2):
-    np.random.seed(random_seed)
-    N = 1
-    wd = math.sqrt(3) * a
-    wphc = np.random.uniform(8, 12)
-    size = [20, wphc + wd]
-    port_len = 3
-
-    n_hole_per_row = int(size[0] // (a * math.sqrt(3) / 2))
-    n_rows = int(wphc // a + 1)
-    if n_rows % 2 != 0:  # n_rows must be even
-        n_rows = n_rows + 1
-
-    init_y_coordinate = +wd / 2 + wphc / 2 - (wphc / 2 - (n_rows / 2 - 1) * a) / 2
-    init_x_coordinate = (
-        size[0] - (a * math.sqrt(3) / 2) * (size[0] // (a * math.sqrt(3) / 2) - 1)
-    ) / 2
-    hole_centers_x = [
-        init_x_coordinate + i * a * math.sqrt(3) / 2 for i in range(n_hole_per_row)
-    ]
-    hole_centers_x = [x_coordinates - size[0] / 2 for x_coordinates in hole_centers_x]
-    hole_centers_y_top = [init_y_coordinate - i * a for i in range(int(n_rows // 2))]
-    hole_centers_y_bottom = [-1 * item for item in hole_centers_y_top]
-    hole_centers_y = hole_centers_y_top + hole_centers_y_bottom
-    holes = []
-    for x in range(len(hole_centers_x)):
-        for y in range(len(hole_centers_y)):
-            if x % 2 == 0:
-                if hole_centers_y[y] < 0:
-                    holes.append((hole_centers_x[x], hole_centers_y[y] + a / 2, radius))
-                else:
-                    holes.append((hole_centers_x[x], hole_centers_y[y] - a / 2, radius))
+    def init_parameters(self):
+        self.wd = torch.sqrt(torch.tensor(3)) # one is the mean and the other is the std
+        self.s1 = torch.sqrt(torch.tensor(3))
+        self.s2 = self.s1 + torch.sqrt(torch.tensor(3))
+        init_position_up_side = torch.zeros(self.num_rows_perside, self.num_cols, 3) # the last dimension is for x, y, sigma, the std for Gaussian splatting
+        for i in range(self.num_rows_perside):
+            if i == 0:
+                init_position_up_side[i, :, 1] = self.s1/2
+            elif i == 1:
+                init_position_up_side[i, :, 1] = self.s2/2
             else:
-                holes.append((hole_centers_x[x], hole_centers_y[y], radius))
+                init_position_up_side[i, :, 1] = self.s2/2 + (i - 1) * self.a / 2 * torch.sqrt(torch.tensor(3))
+        for j in range(self.num_cols):
+            init_position_up_side[:, j, 0] = j * self.a - (self.num_cols - 1) * self.a / 2
 
-    phc = PhC_1x1(
-        N,
-        N,
-        box_size=size,  # box [length, width], um
-        wg_width=(0.5, 0.5),  # in/out wavelength width, um
-        port_diff=(6 / N, 6 / N),  # distance between in/out waveguides. um
-        holes=holes,
-        port_len=port_len,  # length of in/out waveguide from PML to box. um
-        taper_width=wd,
+        for k in range(self.num_rows_perside):
+            if k % 2 == 0:
+                init_position_up_side[k, :, 0] -= self.a / 2
+
+        init_position_down_side = init_position_up_side.clone()
+        for i in range(self.num_rows_perside):
+            init_position_down_side[i, :, 1] = -self.wd/2 - i * self.a / 2 * torch.sqrt(torch.tensor(3))
+        init_position_up_side[:, :, 2] = 0.1
+        init_position_down_side[:, :, 2] = 0.1
+        self.hole_position = nn.Parameter(torch.cat((init_position_up_side, init_position_down_side), dim=0)) # [x_coordinats, y_coordinats, 2]
+    
+    @staticmethod
+    def gaussian(x, y, x0, y0, A, sigma):
+        return A * torch.exp(-((x - x0)**2 + (y - y0)**2) / (2 * sigma**2))
+    
+    def build_permittivity(self, backward=False):
+        if not backward:
+            position_purturbation = 0.07*torch.randn((self.hole_position.shape[0], self.hole_position.shape[1], 2), requires_grad=False)
+            self.position_purturbation = position_purturbation
+        else:
+            position_purturbation = self.position_purturbation
+        hole_position = self.hole_position[:, :, :2] + position_purturbation
+        box_size_x = 2 * self.box_size[0] + 1
+        box_size_y = 2 * self.box_size[1]
+
+        # Define grid
+        x = torch.linspace(-box_size_x/2, box_size_x/2, int(box_size_x * self.resolution) + 1)
+        y = torch.linspace(-box_size_y/2, box_size_y/2, int(box_size_y * self.resolution) + 1)
+        X, Y = torch.meshgrid(x, y)
+
+        Z = torch.zeros_like(X)
+        for i in range(hole_position.shape[0]):
+            for j in range(hole_position.shape[1]):
+                Z += self.gaussian(X, Y, hole_position[i, j, 0], hole_position[i, j, 1], 1, self.hole_position[i, j, 2])
+
+        permittivity = Z
+
+        # update device config with the new permittivity
+        self.device_cfg['box_size'] = [int(box_size_x * self.resolution)/self.resolution, int(box_size_y * self.resolution)/self.resolution]
+
+        self.permittivity_tensor_size = permittivity.shape
+
+        return permittivity
+    
+    def forward(self):
+        permittivity = self.build_permittivity() # update the permittivity and change the device config that fits the permittivity size
+        self.device = PhC_1x1(**self.device_cfg) # create a device used to calculate the objective and gradient
+        self.device.update_permittivity(permittivity, self.device_cfg["box_size"][0], self.device_cfg["box_size"][1])
+        self.device.add_source(0)
+        self.device.create_simulation(**self.sim_cfg)
+        self.device.create_objective(0)
+        self.device.create_optimzation()
+        f0, grad = self.device.obtain_objective_and_gradient()
+
+        # Ensure gradient is a tensor
+        if isinstance(grad, np.ndarray):
+            grad = torch.tensor(grad, dtype=torch.float32)
+        
+        if len(grad.shape) == 2:
+            grad = torch.sum(grad, dim=-1)
+
+        grad = grad.view(*self.permittivity_tensor_size)
+        return f0, grad
+    
+    def backward(self, permittivity_grad):
+        # Compute gradients of permittivity w.r.t. the design variables
+        # design_vars = [self.a, self.wd, self.s1, self.s2, self.hole_position]
+        design_vars = [self.hole_position, self.box_size]
+        output = self.build_permittivity(backward=True)
+        grad_permittivity = torch.autograd.grad(outputs=output, inputs=design_vars, grad_outputs=permittivity_grad, allow_unused=True)
+
+        # Assign the gradients back to the design variables
+        for var, grad in zip(design_vars, grad_permittivity):
+            if var.grad is None:
+                var.grad = grad
+            else:
+                var.grad += grad
+
+if __name__ == "__main__":
+    init_device_cfg = dict(
+        num_in_ports=1,
+        num_out_ports=1,
+        box_size=(6, 5),
+        wg_width=(0.5, 0.5),
+        port_diff=(4, 4),
+        port_len=3,
+        taper_width=math.sqrt(3),
         taper_len=2,
         eps_r=eps_si,
         eps_bg=eps_sio2,
     )
-    phc.add_source(0)
-    phc.create_simulation(
-        resolution=50,
-        stop_when_decay=False,
-        until=250,
+    sim_cfg = dict(
+        resolution=20,
         border_width=[0, 1],
-        PML=[2, 2],
+        PML=(2, 2),
         record_interval=0.3,
+        store_fields=["Ez"],
+        until=250,
+        stop_when_decay=False,
     )
-    return phc
-
-
-if __name__ == "__main__":
-    device = phc_1x1_random(random_seed=0, radius=0.1, a=0.4)
-    device.run_sim(filepath="test_phc_1x1_50_wg0p5.h5", export_video=True)
-    device.dump_config("test_phc_1x1_50_wg0p5.yml")
+    model = Repara_Phc_1x1(init_device_cfg, sim_cfg)
+    f0, grad = model()
+    print(f0)
+    print(grad.shape)
+    model.backward(grad)

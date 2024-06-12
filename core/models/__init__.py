@@ -23,3 +23,4 @@ from .phycrnet import *
 from .fourier_cnn import *
 from .sinenet import *
 from .multistepdynamic_cnn import *
+from phc_1x1 import *
