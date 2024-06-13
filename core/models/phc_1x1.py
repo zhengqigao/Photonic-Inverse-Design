@@ -1,512 +1,21 @@
 import os
-import sys
-from itertools import product
-from typing import Optional, Tuple
-import matplotlib.pyplot as plt
 import matplotlib
 
 matplotlib.rcParams["text.usetex"] = False
-from IPython.display import Video
-import h5py
 import math
-import meep as mp
 import numpy as np
 import torch
-from angler import Simulation
-from pyutils.general import ensure_dir
 import torch.nn as nn
-import meep.adjoint as mpa
-from autograd import numpy as npa
+from layers.phc_1x1_fdtd import PhC_1x1
 # Determine the path to the directory containing device.py
 device_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/fdtd'))
-
-# Add the directory to sys.path
-if device_dir not in sys.path:
-    sys.path.append(device_dir)
-from device import Device
 
 eps_sio2 = 1.44**2
 eps_si = 3.48**2
 
-__all__ = ["PHC_1x1"]
+__all__ = ["Repara_PhC_1x1"]
 
-
-def get_taper(
-    width_wg1: float,
-    width_wg2: float,
-    length_wg1: float,
-    length_wg2: float,
-    length_taper: float,
-    center: Tuple[float, float] = (0, 0),
-    medium: mp.Medium = mp.Medium(epsilon=eps_si),
-):
-    """Generate a taper shape for meep simulation
-    https://meep.readthedocs.io/en/latest/Python_Tutorials/Mode_Decomposition/
-
-    Args:
-        width_wg1 (float): left waveguide width. unit of um
-        width_wg2 (float): right waveguide width. unit of um
-        length_wg1 (float): left waveguide length. unit of um
-        length_wg2 (float): right waveguide length. unit of um
-        length_taper (float): taper length. unit of um
-        center (Tuple[float, float], optional): Center coordinate (x, y). Defaults to (0, 0).
-        medium (mp.Medium, optional): meep Medium for the taper. Defaults to mp.Medium(epsilon=eps_si).
-
-    Returns:
-        _type_: _description_
-    """
-    left1 = center[0] - length_taper / 2 - length_wg1
-    left2 = center[0] - length_taper / 2
-    right1 = center[0] + length_taper / 2 + length_wg2
-    right2 = center[0] + length_taper / 2
-    top1 = center[1] + width_wg1 / 2
-    btm1 = center[1] - width_wg1 / 2
-    top2 = center[1] + width_wg2 / 2
-    btm2 = center[1] - width_wg2 / 2
-
-    ## cannot have duplicate points, otherwise it will impact the centroid calculation.
-    taper_vertices = [mp.Vector3(left1, top1)]
-    if length_wg1 > 0:
-        taper_vertices += [mp.Vector3(left2, top1)]
-    taper_vertices += [mp.Vector3(right2, top2)]
-    if length_wg2 > 0:
-        taper_vertices += [mp.Vector3(right1, top2), mp.Vector3(right1, btm2)]
-    taper_vertices += [
-        mp.Vector3(right2, btm2),
-        mp.Vector3(left2, btm1),
-    ]
-    if length_wg1 > 0:
-        taper_vertices += [
-            mp.Vector3(left1, btm1),
-        ]
-
-    taper = mp.Prism(
-        taper_vertices,
-        height=mp.inf,
-        material=medium,
-    )
-    return taper
-
-
-class PhC_1x1(Device):
-    def __init__(
-        self,
-        num_in_ports: int,
-        num_out_ports: int,
-        box_size: Tuple[float, float],  # box [length, width], um
-        wg_width: Tuple[float, float] = (0.4, 0.4),  # in/out wavelength width, um
-        port_diff: Tuple[float, float] = (
-            4,
-            4,
-        ),  # distance between in/out waveguides. um
-        holes: Optional[Tuple[int, int]] = [],  # [(center_x, center_y, size_x, size_y)]
-        port_len: float = 10,  # length of in/out waveguide from PML to box. um
-        taper_width: float = 0.0,  # taper width near the multi-mode region. um. Default to 0
-        taper_len: float = 0.0,  # taper length. um. Default to 0
-        eps_r: float = eps_si,  # relative refractive index
-        eps_bg: float = eps_sio2,  # background refractive index
-    ):
-        # remove invalid taper
-        if taper_width < 1e-5 or taper_len < 1e-5:
-            taper_width = taper_len = 0
-
-        assert (
-            max(taper_width, wg_width[0]) * num_in_ports <= box_size[1]
-        ), "The input ports cannot fit the multimode region"
-        assert (
-            max(taper_width, wg_width[1]) * num_out_ports <= box_size[1]
-        ), "The output ports cannot fit the multimode region"
-        if taper_width > 1e-5:
-            assert (
-                taper_width >= wg_width[0]
-            ), "Taper width cannot be smaller than input waveguide width"
-            assert (
-                taper_width >= wg_width[1]
-            ), "Taper width cannot be smaller than output waveguide width"
-
-        device_cfg = dict(
-            num_in_ports=num_in_ports,
-            num_out_ports=num_out_ports,
-            holes=str(holes),
-            box_size=box_size,
-            wg_width=wg_width,
-            port_diff=port_diff,
-            port_len=port_len,
-            taper_width=taper_width,
-            taper_len=taper_len,
-            eps_r=eps_r,
-            eps_bg=eps_bg,
-        )
-        super().__init__(**device_cfg)
-
-        self.update_device_config("PhC_1x1", device_cfg)
-
-        self.size = [box_size[0] + port_len * 2, box_size[1]]
-
-        # meep definition
-        # box is defined as another method too
-        # box = mp.Block(
-        #     mp.Vector3(box_size[0], box_size[1], mp.inf),
-        #     center=mp.Vector3(),
-        #     material=mp.Medium(epsilon=eps_r),
-        # )
-        # with open("slots_record.log", "w") as f:
-        #     print("this is the slots: ", slots, file=f)
-        in_ports = [
-            get_taper(
-                width_wg1=wg_width[0],
-                width_wg2=taper_width,
-                length_wg1=port_len - taper_len + 2,
-                length_wg2=0,
-                length_taper=taper_len,
-                center=(
-                    -box_size[0] / 2 - taper_len / 2,
-                    (i - (num_in_ports - 1) / 2) * port_diff[0],
-                ),
-                medium=mp.Medium(epsilon=eps_r),
-            )
-            for i in range(num_in_ports)
-        ]
-
-        out_ports = [
-            get_taper(
-                width_wg1=taper_width,
-                width_wg2=wg_width[1],
-                length_wg1=0,
-                length_wg2=port_len - taper_len + 2,
-                length_taper=taper_len,
-                center=(
-                    box_size[0] / 2 + taper_len / 2,
-                    (i - (num_out_ports - 1) / 2) * port_diff[0],
-                ),
-                medium=mp.Medium(epsilon=eps_r),
-            )
-            for i in range(num_out_ports)
-        ]
-        self.geometry = in_ports + out_ports
-
-        # self.design_region = apply_regions(
-        #     [box], self.xs, self.ys, eps_r_list=1, eps_bg=0
-        # )
-
-        self.in_port_centers = [
-            (
-                -box_size[0] / 2 - 0.98 * port_len,
-                (i - (num_in_ports - 1) / 2) * port_diff[0],
-            )
-            for i in range(num_in_ports)
-        ]  # centers
-
-        self.out_port_centers = [
-            (
-                box_size[0] / 2 + 0.98 * port_len,
-                (float(i) - float(num_out_ports - 1) / 2.0) * port_diff[1],
-            )
-            for i in range(num_out_ports)
-        ]  # centers
-
-    def add_source(
-        self,
-        in_port_idx: int,
-        src_type: str = "GaussianSource",
-        wl_cen=1.55,
-        wl_width: float = 0.1,
-        alpha: float = 0.5,
-    ):
-        fcen = 1 / wl_cen  # pulse center frequency
-        ## alpha from 1/3 to 1/2
-        fwidth = (
-            3 * alpha * (1 / (wl_cen - wl_width / 2) - 1 / (wl_cen + wl_width / 2))
-        )  # pulse frequency width
-        self.fcen = fcen
-        self.fwidth = fwidth
-        if src_type == "GaussianSource":
-            src_fn = mp.GaussianSource
-        else:
-            raise NotImplementedError
-        src_center = list(self.in_port_centers[in_port_idx]) + [0]
-        src_size = (0, 1.5 * self.wg_width[0], 0)
-        self.sources.append(
-            mp.EigenModeSource(
-                src=src_fn(fcen, fwidth=fwidth),
-                center=mp.Vector3(*src_center),
-                size=src_size,
-                eig_match_freq=True,
-                eig_parity=mp.ODD_Z + mp.EVEN_Y,
-            )
-        )
-
-        self.add_source_config(
-            dict(
-                src_type=src_type,
-                in_port_idx=in_port_idx,
-                src_center=src_center,
-                src_size=src_size,
-                eig_match_freq=True,
-                eig_parity=mp.ODD_Z + mp.EVEN_Y,
-                wl_cen=wl_cen,
-                wl_width=wl_width,
-                alpha=alpha,
-            )
-        )
-
-    def update_permittivity(self, permittivity: torch.Tensor, box_size_x: float = 6, box_size_y: float = 5):
-        permittivity = permittivity.detach().numpy()
-        design_region_size = mp.Vector3(box_size_x, box_size_y, 0)
-        medium1 = mp.Medium(epsilon=self.config.device.cfg.eps_bg)
-        medium2 = mp.Medium(epsilon=self.config.device.cfg.eps_r)
-        design_variables = mp.MaterialGrid(
-            mp.Vector3(permittivity.shape[0], permittivity.shape[1]), 
-            medium1, 
-            medium2, 
-            weights=permittivity, 
-            grid_type="U_MEAN"
-        )
-        self.design_region = mpa.DesignRegion(design_variables, volume=mp.Volume(center=mp.Vector3(), size=design_region_size))
-        self.geometry = self.geometry + [mp.Block(center=mp.Vector3(), size=design_region_size, material=design_variables)]
-
-    def create_simulation(
-        self,
-        resolution: int = 10,  # pixels / um
-        border_width: Tuple[float, float] = [1, 1],  # um, [x, y]
-        PML: Tuple[int, int] = (2, 2),  # um, [x, y]
-        record_interval: float = 0.3,  # timeunits, change it to 0.4 to match the time interval = 0.3 in mrr simulation
-        store_fields=["Ex", "Ey", "Ez", "Hx", "Hy", "Hz"],
-        until: float = None,  # timesteps
-        stop_when_decay: bool = False,
-    ):
-        boundary = [
-            mp.PML(PML[0], direction=mp.X),
-            mp.PML(PML[1], direction=mp.Y),
-        ]
-
-        sx = PML[0] * 2 + self.size[0] + border_width[0] * 2
-        sy = PML[1] * 2 + self.size[1] + border_width[1] * 2
-        cell_size = (sx, sy, 0)
-        self.sim = mp.Simulation(
-            resolution=resolution,
-            cell_size=mp.Vector3(*cell_size),
-            boundary_layers=boundary,
-            geometry=self.geometry,
-            sources=self.sources,
-            default_material=mp.Medium(epsilon=self.config.device.cfg.eps_bg),
-            force_all_components=True,
-        )
-        self.update_simulation_config(
-            dict(
-                resolution=resolution,
-                border_width=border_width,
-                PML=PML,
-                cell_size=cell_size,
-                record_interval=record_interval,
-                store_fields=store_fields,
-                until=until,
-                stop_when_decay=stop_when_decay,
-            )
-        )
-        return self.sim
-
-    def create_objective(self, out_port_idx: int):
-        te = mpa.EigenmodeCoefficient(
-            self.sim, mp.Volume(center=mp.Vector3(*self.out_port_centers[out_port_idx]), size=mp.Vector3(y=1.2)), mode=1
-        )
-        self.ob_list = [te]
-
-    @staticmethod
-    def J(alpha):
-        return npa.abs(alpha) ** 2
-    
-    def create_optimzation(self):
-        self.opt = mpa.OptimizationProblem(
-            simulation=self.sim,
-            objective_functions=self.J,
-            objective_arguments=self.ob_list,
-            design_regions=self.design_region,
-            fcen=self.fcen,
-            df=0,
-            nf=1,
-            # df=self.fwidth,
-            # nf=20,
-        )
-
-    def obtain_objective_and_gradient(self):
-        f0, grad = self.opt()
-        return f0, grad
-
-    def run_sim(
-        self,
-        filepath: str = None,
-        export_video: bool = False,
-    ):
-        stop_when_decay = self.config.simulation.stop_when_decay
-        output = dict(
-            eps=None,
-            Ex=[],
-            Ey=[],
-            Ez=[],
-            Hx=[],
-            Hy=[],
-            Hz=[],
-        )
-        store_fields = self.config.simulation.store_fields
-
-        def record_fields(sim):
-            for field in store_fields:
-                if field == "Ex":
-                    data = sim.get_efield_x()
-                elif field == "Ey":
-                    data = sim.get_efield_y()
-                elif field == "Ez":
-                    data = sim.get_efield_z()
-                elif field == "Hx":
-                    data = sim.get_hfield_x()
-                elif field == "Hy":
-                    data = sim.get_hfield_y()
-                elif field == "Hz":
-                    data = sim.get_hfield_z()
-                output[field].append(data)
-
-        at_every = [record_fields]
-        if export_video:
-            f = plt.figure(dpi=150)
-            Animate = mp.Animate2D(fields=mp.Ez, f=f, realtime=False, normalize=True)
-            at_every.append(Animate)
-
-        if stop_when_decay:
-            monitor_cen = list(self.out_port_centers[0]) + [0]
-
-            self.sim.run(
-                mp.at_every(self.config.simulation.record_interval, *at_every),
-                until_after_sources=mp.stop_when_fields_decayed(
-                    50, mp.Ez, monitor_cen, 1e-9
-                ),
-            )
-        else:
-            self.sim.run(
-                mp.at_every(self.config.simulation.record_interval, *at_every),
-                until=self.config.simulation.until,
-            )
-        ensure_dir(os.path.dirname(filepath))
-
-        if export_video:
-            filename = filepath[:-3] + ".mp4"
-            Animate.to_mp4(20, filename)
-            Video(filename)
-        # self.sim.plot2D(fields=mp.Ez)
-        PML, res = self.config.simulation.PML, self.config.simulation.resolution
-        output["eps"] = self.trim_pml(
-            res, PML, self.sim.get_epsilon().astype(np.float16)
-        )
-
-        for field, data in output.items():
-            if isinstance(data, list) and len(data) > 0:
-                output[field] = self.trim_pml(res, PML, np.array(data))
-
-        if filepath is not None:
-            hf = h5py.File(filepath, "w")
-            hf.create_dataset("eps", data=output["eps"])
-            max_vals = (
-                np.max(np.abs(output["Ex"])),
-                np.max(np.abs(output["Ey"])),
-                np.max(np.abs(output["Ez"])),
-                np.max(np.abs(output["Hx"])),
-                np.max(np.abs(output["Hy"])),
-                np.max(np.abs(output["Hz"])),
-            )
-            # print(max_vals)
-            max_val = max(max_vals)
-            # print(np.mean(output["Ez"]))
-            # print(np.std(output["Ez"]))
-            self.config.simulation.update(dict(field_max_val=max_val.item()))
-            # hf.create_dataset("Ex", data=(output["Ex"] / max_val).astype(np.float32))
-            # hf.create_dataset("Ey", data=(output["Ey"] / max_val).astype(np.float32))
-            hf.create_dataset("Ez", data=(output["Ez"] / max_val).astype(np.float16))
-            # hf.create_dataset("Hx", data=(output["Hx"] / max_val).astype(np.float16))
-            # hf.create_dataset("Hy", data=(output["Hy"] / max_val).astype(np.float16))
-            # hf.create_dataset("Hz", data=(output["Hz"] / max_val).astype(np.float32))
-            hf.create_dataset("meta", data=str(self.config))
-
-        return output
-    
-    def resize(self, x, size, mode="bilinear"):
-        if not isinstance(x, torch.Tensor):
-            y = torch.from_numpy(x)
-        else:
-            y = x
-        y = y.view(-1, 1, x.shape[-2], x.shape[-1])
-        old_grid_step = (self.grid_step, self.grid_step)
-        old_size = y.shape[-2:]
-        new_grid_step = [
-            old_size[0] / size[0] * old_grid_step[0],
-            old_size[1] / size[1] * old_grid_step[1],
-        ]
-        if y.is_complex():
-            y = torch.complex(
-                torch.nn.functional.interpolate(y.real, size=size, mode=mode),
-                torch.nn.functional.interpolate(y.imag, size=size, mode=mode),
-            )
-        else:
-            y = torch.nn.functional.interpolate(y, size=size, mode=mode)
-        y = y.view(list(x.shape[:-2]) + list(size))
-        if isinstance(x, np.ndarray):
-            y = y.numpy()
-        return y, new_grid_step
-
-    def extract_transfer_matrix(
-        self, eps_map: torch.Tensor, wavelength: float = 1.55, pol: str = "Hz"
-    ) -> torch.Tensor:
-        # extract the transfer matrix of the N-port MMI from input ports to output ports up to a global phase
-        c0 = 299792458
-        source_amp = (
-            1e-9  # amplitude of modal source (make around 1 for nonlinear effects)
-        )
-        neff_si = 3.48
-        lambda0 = wavelength / 1e6  # free space wavelength (m)
-        omega = 2 * np.pi * c0 / lambda0  # angular frequency (2pi/s)
-        transfer_matrix = np.zeros(
-            [self.num_out_ports, self.num_in_ports], dtype=np.complex64
-        )
-        for i in range(self.num_in_ports):
-            simulation = Simulation(omega, eps_map, self.grid_step, self.NPML, pol)
-            simulation.add_mode(
-                neff=neff_si,
-                direction_normal="x",
-                center=self.in_port_centers_px[i],
-                width=int(2 * self.in_port_width_px[i]),
-                scale=source_amp,
-            )
-            simulation.setup_modes()
-            # eigenmode analysis
-            center = self.in_port_centers_px[i]
-            width = int(2 * self.in_port_width_px[i])
-            inds_y = [int(center[1] - width / 2), int(center[1] + width / 2)]
-            eigen_mode = simulation.src[center[0], inds_y[0] : inds_y[1]].conj()
-
-            simulation.solve_fields()
-            if pol == "Hz":
-                field = simulation.fields["Hz"]
-            else:
-                field = simulation.fields["Ez"]
-            input_field = field[center[0], inds_y[0] : inds_y[1]]
-            input_field_mode = input_field.dot(eigen_mode)
-            for j in range(self.num_out_ports):
-                out_center = self.out_port_pixel_centers[j]
-                out_width = int(2 * self.out_port_width_px[j])
-                out_inds_y = [
-                    int(out_center[1] - out_width / 2),
-                    int(out_center[1] + out_width / 2),
-                ]
-                output_field = field[out_center[0], out_inds_y[0] : out_inds_y[1]]
-                s21 = output_field.dot(eigen_mode) / input_field_mode
-                transfer_matrix[j, i] = s21
-        return transfer_matrix
-
-    def __repr__(self) -> str:
-        str = f"Metaline{self.num_in_ports}x{self.num_out_ports}("
-        str += f"size = {self.box_size[0]} um x {self.box_size[1]} um)"
-        return str
-    
-class Repara_Phc_1x1(nn.Module):
+class Repara_PhC_1x1(nn.Module):
     ''' this class is used to optimize the PhC_1x1 device
 
     1. init a latent vector that represents the device
@@ -520,17 +29,30 @@ class Repara_Phc_1x1(nn.Module):
     def __init__(
             self, 
             device_cfg, 
-            sim_cfg
+            sim_cfg, 
+            purturbation=False,
+            num_rows_perside=6,
+            num_cols=8,
         ):
-        super(Repara_Phc_1x1, self).__init__()
+        super(Repara_PhC_1x1, self).__init__()
         self.device_cfg = device_cfg
+        for key in self.device_cfg:
+            if type(self.device_cfg[key]) == str:
+                self.device_cfg[key] = eval(self.device_cfg[key])
+        self.purturbation = purturbation
         self.a = torch.tensor(1.0)
-        self.box_size = nn.Parameter(torch.tensor([5.0, 5.0]))
-        self.num_rows_perside = 6
-        self.num_cols = 8
+        self.box_size = torch.tensor(device_cfg["box_size"], dtype=torch.float32)
+        self.num_rows_perside = num_rows_perside
+        self.num_cols = num_cols
         self.init_parameters()
         self.sim_cfg = sim_cfg
+        for key in self.sim_cfg:
+            if type(self.sim_cfg[key]) == str:
+                self.sim_cfg[key] = eval(self.sim_cfg[key])
         self.resolution = sim_cfg["resolution"]
+        self.build_permittivity()
+        print("this is the device config: ", self.device_cfg)
+        print("this is the sim config: ", self.sim_cfg)
 
     def init_parameters(self):
         self.wd = torch.sqrt(torch.tensor(3)) # one is the mean and the other is the std
@@ -563,18 +85,19 @@ class Repara_Phc_1x1(nn.Module):
         return A * torch.exp(-((x - x0)**2 + (y - y0)**2) / (2 * sigma**2))
     
     def build_permittivity(self, backward=False):
-        if not backward:
-            position_purturbation = 0.07*torch.randn((self.hole_position.shape[0], self.hole_position.shape[1], 2), requires_grad=False)
-            self.position_purturbation = position_purturbation
+        if self.purturbation:
+            if not backward:
+                position_purturbation = 0.07*torch.randn((self.hole_position.shape[0], self.hole_position.shape[1], 2), requires_grad=False)
+                self.position_purturbation = position_purturbation
+            else:
+                position_purturbation = self.position_purturbation
+            hole_position = self.hole_position[:, :, :2] + position_purturbation
         else:
-            position_purturbation = self.position_purturbation
-        hole_position = self.hole_position[:, :, :2] + position_purturbation
-        box_size_x = 2 * self.box_size[0] + 1
-        box_size_y = 2 * self.box_size[1]
+            hole_position = self.hole_position[:, :, :2]
 
         # Define grid
-        x = torch.linspace(-box_size_x/2, box_size_x/2, int(box_size_x * self.resolution) + 1)
-        y = torch.linspace(-box_size_y/2, box_size_y/2, int(box_size_y * self.resolution) + 1)
+        x = torch.linspace(-self.box_size[0]/2, self.box_size[0]/2, int(self.box_size[0] * self.resolution) + 1)
+        y = torch.linspace(-self.box_size[1]/2, self.box_size[1]/2, int(self.box_size[1] * self.resolution) + 1)
         X, Y = torch.meshgrid(x, y)
 
         Z = torch.zeros_like(X)
@@ -584,37 +107,46 @@ class Repara_Phc_1x1(nn.Module):
 
         permittivity = Z
 
+        # normalize the permittivity with the maximum value
+        permittivity = permittivity / torch.max(permittivity)
+
         # update device config with the new permittivity
-        self.device_cfg['box_size'] = [int(box_size_x * self.resolution)/self.resolution, int(box_size_y * self.resolution)/self.resolution]
+        self.device_cfg['box_size'] = [int(self.box_size[0] * self.resolution)/self.resolution, int(self.box_size[1] * self.resolution)/self.resolution]
 
         self.permittivity_tensor_size = permittivity.shape
 
         return permittivity
     
-    def forward(self):
-        permittivity = self.build_permittivity() # update the permittivity and change the device config that fits the permittivity size
-        self.device = PhC_1x1(**self.device_cfg) # create a device used to calculate the objective and gradient
-        self.device.update_permittivity(permittivity, self.device_cfg["box_size"][0], self.device_cfg["box_size"][1])
-        self.device.add_source(0)
-        self.device.create_simulation(**self.sim_cfg)
-        self.device.create_objective(0)
-        self.device.create_optimzation()
-        f0, grad = self.device.obtain_objective_and_gradient()
+    @staticmethod
+    def binarize_projection(permittivity, T):
+        result = torch.sigmoid((permittivity - 0.5) / T)
+        return result
 
-        # Ensure gradient is a tensor
-        if isinstance(grad, np.ndarray):
-            grad = torch.tensor(grad, dtype=torch.float32)
-        
-        if len(grad.shape) == 2:
-            grad = torch.sum(grad, dim=-1)
+    def calculate_objective_and_gradient(self, permittivity, mode = "fdtd"):
+        if mode == "fdtd":
+            f0, grad = self._calculate_objective_and_gradient_fdtd(permittivity)
+        else:
+            raise NotImplementedError
+            
+        return f0, grad
 
-        grad = grad.view(*self.permittivity_tensor_size)
+    def _calculate_objective_and_gradient_fdtd(self, permittivity):
+        device = PhC_1x1(**self.device_cfg)
+        device.update_permittivity(permittivity, self.device_cfg["box_size"][0], self.device_cfg["box_size"][1])
+        device.add_source(0)
+        device.create_simulation(**self.sim_cfg)
+        device.create_objective(0, 0)
+        device.create_optimzation()
+        f0, grad = device.obtain_objective_and_gradient()
         return f0, grad
     
     def backward(self, permittivity_grad):
         # Compute gradients of permittivity w.r.t. the design variables
-        # design_vars = [self.a, self.wd, self.s1, self.s2, self.hole_position]
-        design_vars = [self.hole_position, self.box_size]
+        # design_vars = [self.hole_position, self.box_size]
+        # TODO: how to optimze the box_size? it still look strange to me
+        # if the gradient at point (x, y) is -1, it means that the permittivity at (x, y) should be decreased
+        # but in which way the box_size should be changed accordingly?
+        design_vars = [self.hole_position]
         output = self.build_permittivity(backward=True)
         grad_permittivity = torch.autograd.grad(outputs=output, inputs=design_vars, grad_outputs=permittivity_grad, allow_unused=True)
 
@@ -624,31 +156,52 @@ class Repara_Phc_1x1(nn.Module):
                 var.grad = grad
             else:
                 var.grad += grad
+            print("this is the gradient of the hole position: ", var.grad)
+
+    def forward(self, T):
+        permittivity = self.build_permittivity() # update the permittivity and change the device config that fits the permittivity size
+        permittivity = self.binarize_projection(permittivity, T)
+        f0, grad = self.calculate_objective_and_gradient(permittivity)
+        
+        if isinstance(grad, np.ndarray): # make sure the gradient is torch tensor
+            grad = torch.tensor(grad, dtype=torch.float32)
+        
+        if len(grad.shape) == 2: # summarize the gradient along different frquencies
+            grad = torch.sum(grad, dim=-1)
+
+        grad = grad.view(*self.permittivity_tensor_size)
+        return f0, grad, self.hole_position
 
 if __name__ == "__main__":
     init_device_cfg = dict(
-        num_in_ports=1,
-        num_out_ports=1,
-        box_size=(6, 5),
-        wg_width=(0.5, 0.5),
-        port_diff=(4, 4),
-        port_len=3,
-        taper_width=math.sqrt(3),
-        taper_len=2,
-        eps_r=eps_si,
-        eps_bg=eps_sio2,
+        num_in_ports = 1,
+        num_out_ports = 1,
+        box_size = [19.8, 12],
+        wg_width = (1.7320508076, 1.7320508076),
+        port_diff = (4, 4),
+        port_len = 3,
+        taper_width = 1.7320508076,
+        taper_len = 2,
+        eps_r = 12.1104,
+        eps_bg = 2.0736,
     )
     sim_cfg = dict(
-        resolution=20,
-        border_width=[0, 1],
-        PML=(2, 2),
-        record_interval=0.3,
-        store_fields=["Ez"],
-        until=250,
-        stop_when_decay=False,
+        resolution = 20,
+        border_width = [0, 1],
+        PML = (2, 2),
+        record_interval = 0.3,
+        store_fields = ['Ez'],
+        until = 250,
+        stop_when_decay = False,
     )
-    model = Repara_Phc_1x1(init_device_cfg, sim_cfg)
-    f0, grad = model()
+    model = Repara_PhC_1x1(
+            device_cfg=init_device_cfg, 
+            sim_cfg=sim_cfg, 
+            purturbation=False,
+            num_rows_perside=6,
+            num_cols=8,
+        )
+    f0, grad, hole_position = model(0.01)
     print(f0)
-    print(grad.shape)
+    print(grad)
     model.backward(grad)

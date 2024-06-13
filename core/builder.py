@@ -23,6 +23,8 @@ from .utils import (
     maskedNMSELoss,
     NL2NormLoss,
     maskedNL2NormLoss,
+    TemperatureScheduler,
+    DistanceLoss,
 )
 
 __all__ = [
@@ -382,237 +384,15 @@ def make_dataloader(
 
 
 def make_model(device: Device, random_state: int = None, **kwargs) -> nn.Module:
-    if "cnnfdtd" in configs.model.name.lower():
+    if "repara_phc_1x1" in configs.model.name.lower():
         model = eval(configs.model.name)(
-            img_size=configs.dataset.img_height,
-            in_channels=1 + configs.dataset.in_frames + configs.model.out_channels,
-            out_channels=configs.model.out_channels,
-            in_frames=configs.dataset.in_frames,
-            kernel_list=configs.model.kernel_list,
-            kernel_size_list=configs.model.kernel_size_list,
-            stride_list=configs.model.stride_list,
-            padding_list=configs.model.padding_list,
-            hidden_list=configs.model.hidden_list,
-            act_func=configs.model.act_func,
-            norm=configs.model.norm,
-            dropout_rate=configs.model.dropout_rate,
-            drop_path_rate=configs.model.drop_path_rate,
-            device=device,
-            aux_head=configs.model.aux_head,
-            aux_stide=configs.model.aux_stride,
-            aux_padding=configs.model.aux_padding,
-            aux_kernel_size_list=configs.model.aux_kernel_size_list,
-            field_norm_mode=configs.model.field_norm_mode,
-            **kwargs,
-        ).to(device)
-    elif "fouriercnn" in configs.model.name.lower():
-        model = eval(configs.model.name)(
-            img_size=configs.dataset.img_height,
-            in_channels=1 + configs.dataset.offset_frames + configs.model.out_channels,
-            out_channels=configs.model.out_channels,
-            in_frames=configs.dataset.in_frames,
-            offset_frames=configs.dataset.offset_frames,
-            input_cfg=configs.model.input_cfg,
-            guidance_generator_cfg = configs.model.guidance_generator_cfg,
-            encoder_cfg=configs.model.encoder_cfg,
-            backbone_cfg=configs.model.backbone_cfg,
-            decoder_cfg=configs.model.decoder_cfg,
-            dropout_rate=configs.model.dropout_rate,
-            drop_path_rate=configs.model.drop_path_rate,
-            device=device,
-            aux_head=configs.model.aux_head,
-            aux_stide=configs.model.aux_stride,
-            aux_padding=configs.model.aux_padding,
-            aux_kernel_size_list=configs.model.aux_kernel_size_list,
-            field_norm_mode=configs.model.field_norm_mode,
-            num_iters = configs.model.num_iters,
-            eps_lap = configs.model.input_cfg.eps_lap,
-            pac = configs.model.encoder_cfg.pac or configs.model.decoder_cfg.pac or configs.model.backbone_cfg.pac,
-            max_propagating_filter = configs.model.max_propagating_filter,
-            **kwargs,
-        ).to(device)
-        model.reset_parameters(random_state)
-    elif "multistepdynamiccnn" in configs.model.name.lower():
-        model = eval(configs.model.name)(
-            img_size=configs.dataset.img_height,
-            in_channels=1 + configs.dataset.offset_frames + configs.model.out_channels,
-            out_channels=configs.model.out_channels,
-            in_frames=configs.dataset.in_frames,
-            offset_frames=configs.dataset.offset_frames,
-            input_cfg=configs.model.input_cfg,
-            history_encoder_cfg=configs.model.history_encoder_cfg,
-            guidance_generator_cfg = configs.model.guidance_generator_cfg,
-            encoder_cfg=configs.model.encoder_cfg,
-            backbone_cfg=configs.model.backbone_cfg,
-            decoder_cfg=configs.model.decoder_cfg,
-            dropout_rate=configs.model.dropout_rate,
-            drop_path_rate=configs.model.drop_path_rate,
-            device=device,
-            aux_head=configs.model.aux_head,
-            aux_stide=configs.model.aux_stride,
-            aux_padding=configs.model.aux_padding,
-            aux_kernel_size_list=configs.model.aux_kernel_size_list,
-            field_norm_mode=configs.model.field_norm_mode,
-            num_iters = configs.model.num_iters,
-            eps_lap = configs.model.input_cfg.eps_lap,
-            pac = configs.model.encoder_cfg.pac or configs.model.decoder_cfg.pac or configs.model.backbone_cfg.pac,
-            share_encoder = configs.model.share_encoder,
-            share_decoder = configs.model.share_decoder,
-            share_backbone = configs.model.share_backbone,
-            share_history_encoder = configs.model.share_history_encoder,
-            if_pass_history = configs.model.if_pass_history,
-            if_pass_grad = configs.model.if_pass_grad,
-            **kwargs,
-        ).to(device)
-        model.reset_parameters(random_state)
-    elif "neuralop_fno" in configs.model.name.lower():
-        model = FNO(
-            n_modes=configs.model.mode_list,
-            in_channels=configs.dataset.in_channels,
-            out_channels=configs.dataset.out_channels,
-            hidden_channels=configs.model.hidden_dim,
-            projection_channels=configs.model.proj_dim,
-            n_layers=configs.model.n_layers,
-        ).to(device)
-    elif "ffno" in configs.model.name.lower():
-        model = eval(configs.model.name)(
-            in_channels=configs.model.in_channels,
-            out_channels=configs.model.out_channels,
-            in_frames = configs.model.in_frames,
-            dim=configs.model.dim,
-            kernel_list=configs.model.kernel_list,
-            kernel_size_list=configs.model.kernel_size_list,
-            padding_list=configs.model.padding_list,
-            mode_list=configs.model.mode_list,
-            act_func=configs.model.act_func,
-            domain_size=configs.model.domain_size,
-            grid_step=configs.model.grid_step,
-            buffer_width=configs.model.buffer_width,
-            dropout_rate=configs.model.dropout_rate,
-            drop_path_rate=configs.model.drop_path_rate,
-            aux_head=configs.model.aux_head,
-            aux_head_idx=configs.model.aux_head_idx,
-            pos_encoding=configs.model.pos_encoding,
-            with_cp=configs.model.with_cp,
-            device=device,
-            conv_stem=configs.model.conv_stem,
-            aug_path=configs.model.aug_path,
-            ffn=configs.model.ffn,
-            ffn_dwconv=configs.model.ffn_dwconv,
-            encoder_cfg = configs.model.encoder_cfg,
-            backbone_cfg = configs.model.backbone_cfg,
-            decoder_cfg = configs.model.decoder_cfg,
-            **kwargs,
-        ).to(device)
-    elif "fno3d" in configs.model.name.lower():
-        model = eval(configs.model.name)(
-            in_frames=configs.dataset.in_frames,
-            img_size=configs.dataset.img_height,
-            in_channels=configs.model.in_channels,
-            out_channels=configs.model.out_channels,
-            dim=configs.model.dim,
-            kernel_list=configs.model.kernel_list,
-            kernel_size_list=configs.model.kernel_size_list,
-            padding_list=configs.model.padding_list,
-            mode_list=configs.model.mode_list,
-            act_func=configs.model.act_func,
-            dropout_rate=configs.model.dropout_rate,
-            drop_path_rate=configs.model.drop_path_rate,
-            aux_head=configs.model.aux_head,
-            aux_head_idx=configs.model.aux_head_idx,
-            pos_encoding="none",
-            with_cp=configs.model.with_cp,
-            device=device,
-            **kwargs,
-        ).to(device)
-    elif "kno2d" in configs.model.name.lower():
-        model = eval(configs.model.name)(
-            in_frames=configs.model.in_frames,
-            img_size=configs.dataset.img_height,
-            in_channels=configs.model.in_channels,
-            out_channels=configs.model.out_channels,
-            dim=configs.model.dim,
-            kernel_list=configs.model.kernel_list,
-            kernel_size_list=configs.model.kernel_size_list,
-            padding_list=configs.model.padding_list,
-            mode_list=configs.model.mode_list,
-            act_func=configs.model.act_func,
-            dropout_rate=configs.model.dropout_rate,
-            drop_path_rate=configs.model.drop_path_rate,
-            aux_head=configs.model.aux_head,
-            aux_head_idx=configs.model.aux_head_idx,
-            pos_encoding=configs.model.pos_encoding,
-            with_cp=configs.model.with_cp,
-            kno_alg=configs.model.kno_alg,
-            kno_r=configs.model.kno_r,
-            # T1=configs.model.T1,
-            transform=configs.model.transform,
-            # num_iters=configs.model.num_iters,
-            device=device,
-            encoder_cfg=configs.model.encoder_cfg,
-            backbone_cfg=configs.model.backbone_cfg,
-            decoder_cfg=configs.model.decoder_cfg,
-            **kwargs,
-        ).to(device)
-        # model.reset_parameters(random_state)
-    elif "neurolight" in configs.model.name.lower():
-        model = eval(configs.model.name)(
-            in_frames=configs.dataset.in_frames,
-            in_channels=configs.model.in_channels,
-            out_channels=configs.model.out_channels,
-            dim=configs.model.dim,
-            kernel_list=configs.model.kernel_list,
-            kernel_size_list=configs.model.kernel_size_list,
-            padding_list=configs.model.padding_list,
-            mode_list=configs.model.mode_list,
-            act_func=configs.model.act_func,
-            domain_size=configs.model.domain_size,
-            grid_step=configs.model.grid_step,
-            buffer_width=configs.model.buffer_width,
-            dropout_rate=configs.model.dropout_rate,
-            drop_path_rate=configs.model.drop_path_rate,
-            aux_head=configs.model.aux_head,
-            aux_head_idx=configs.model.aux_head_idx,
-            pos_encoding=configs.model.pos_encoding,
-            with_cp=configs.model.with_cp,
-            device=device,
-            conv_stem=configs.model.conv_stem,
-            aug_path=configs.model.aug_path,
-            ffn=configs.model.ffn,
-            ffn_dwconv=configs.model.ffn_dwconv,
-            encoder_cfg=configs.model.encoder_cfg,
-            backbone_cfg=configs.model.backbone_cfg,
-            decoder_cfg=configs.model.decoder_cfg,
-            **kwargs,
-        ).to(device)
-    elif "sinenet" in configs.model.name.lower():
-        model = eval(configs.model.name)(
-        n_input_scalar_components=configs.model.n_input_scalar_components,
-        n_input_vector_components=configs.model.n_input_vector_components,
-        n_output_scalar_components=configs.model.n_output_scalar_components,
-        n_output_vector_components=configs.model.n_output_vector_components,
-        time_history=configs.model.time_history,
-        in_frames=configs.model.in_frames,
-        time_future=configs.model.time_future,
-        hidden_channels=configs.model.hidden_channels,
-        padding_mode=configs.model.padding_mode,
-        activation="gelu",
-        num_layers=configs.model.num_layers,
-        num_waves=configs.model.num_waves,
-        num_blocks=configs.model.num_blocks,
-        norm=True,
-        mult=2,
-        residual=True,
-        wave_residual=True,
-        disentangle=True,
-        down_pool=True,
-        avg_pool=True,
-        up_interpolation=True,
-        interpolation_mode='bicubic',
-        par1=None
-        ).to(device)
+            device_cfg=configs.model.device_cfg, 
+            sim_cfg=configs.model.sim_cfg, 
+            purturbation=configs.model.purturbation,
+            num_rows_perside=configs.model.num_rows_perside,
+            num_cols=configs.model.num_cols,
+        )
     else:
-        model = None
         raise NotImplementedError(f"Not supported model name: {configs.model.name}")
     return model
 
@@ -673,9 +453,15 @@ def make_optimizer(params, name: str = None, configs=None) -> Optimizer:
     return optimizer
 
 
-def make_scheduler(optimizer: Optimizer, name: str = None) -> Scheduler:
-    name = (name or configs.scheduler.name).lower()
-    if name == "constant":
+def make_scheduler(optimizer: Optimizer, name: str = None, config_file: dict = {}) -> Scheduler:
+    name = (name or config_file.name).lower()
+    if name == "temperature": # this temperature scheduler is a cosine annealing scheduler
+        scheduler = TemperatureScheduler(
+            initial_T=float(configs.temp_scheduler.lr),
+            final_T=float(configs.temp_scheduler.lr_min),
+            total_steps=int(configs.run.n_epochs),
+        )
+    elif name == "constant":
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer, lr_lambda=lambda epoch: 1
         )
@@ -683,7 +469,7 @@ def make_scheduler(optimizer: Optimizer, name: str = None) -> Scheduler:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
             T_max=int(configs.run.n_epochs),
-            eta_min=float(configs.scheduler.lr_min),
+            eta_min=float(configs.lr_scheduler.lr_min),
         )
     elif name == "cosine_warmup":
         scheduler = CosineAnnealingWarmupRestarts(
@@ -716,6 +502,8 @@ def make_criterion(name: str = None, cfg=None) -> nn.Module:
         criterion = maskedNL2NormLoss(weighted_frames=cfg.weighted_frames, weight=cfg.weight, if_spatial_mask=cfg.if_spatial_mask)
     elif name == "masknmse":
         criterion = maskedNMSELoss(weighted_frames=cfg.weighted_frames, weight=cfg.weight, if_spatial_mask=cfg.if_spatial_mask)
+    elif name == "distanceloss":
+        criterion = DistanceLoss(min_distance=cfg.min_distance)
     else:
         raise NotImplementedError(name)
     return criterion

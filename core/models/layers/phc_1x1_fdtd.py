@@ -1,5 +1,5 @@
 import os
-from itertools import product
+import sys
 from typing import Optional, Tuple
 import matplotlib.pyplot as plt
 import matplotlib
@@ -7,19 +7,26 @@ import matplotlib
 matplotlib.rcParams["text.usetex"] = False
 from IPython.display import Video
 import h5py
-import math
 import meep as mp
 import numpy as np
 import torch
 from angler import Simulation
 from pyutils.general import ensure_dir
+import meep.adjoint as mpa
+from autograd import numpy as npa
+import math
+# Determine the path to the directory containing device.py
+device_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../data/fdtd'))
 
+# Add the directory to sys.path
+if device_dir not in sys.path:
+    sys.path.append(device_dir)
 from device import Device
 
 eps_sio2 = 1.44**2
 eps_si = 3.48**2
 
-__all__ = ["PHC_1x1"]
+__all__ = ["PhC_1x1"]
 
 
 def get_taper(
@@ -84,7 +91,7 @@ class PhC_1x1(Device):
         self,
         num_in_ports: int,
         num_out_ports: int,
-        box_size: Tuple[float, float],  # box [length, width], um
+        box_size: list[float, float],  # box [length, width], um
         wg_width: Tuple[float, float] = (0.4, 0.4),  # in/out wavelength width, um
         port_diff: Tuple[float, float] = (
             4,
@@ -134,22 +141,6 @@ class PhC_1x1(Device):
 
         self.size = [box_size[0] + port_len * 2, box_size[1]]
 
-        # meep definition
-        box = mp.Block(
-            mp.Vector3(box_size[0], box_size[1], mp.inf),
-            center=mp.Vector3(),
-            material=mp.Medium(epsilon=eps_r),
-        )
-        # with open("slots_record.log", "w") as f:
-        #     print("this is the slots: ", slots, file=f)
-        etched_holes = [
-            mp.Cylinder(
-                radius=radius,
-                center=mp.Vector3(center_x, center_y),
-                material=mp.Medium(epsilon=eps_bg),
-            )
-            for center_x, center_y, radius in holes
-        ]
         in_ports = [
             get_taper(
                 width_wg1=wg_width[0],
@@ -181,11 +172,7 @@ class PhC_1x1(Device):
             )
             for i in range(num_out_ports)
         ]
-        self.geometry = [box] + in_ports + out_ports + etched_holes
-
-        # self.design_region = apply_regions(
-        #     [box], self.xs, self.ys, eps_r_list=1, eps_bg=0
-        # )
+        self.geometry = in_ports + out_ports
 
         self.in_port_centers = [
             (
@@ -216,6 +203,8 @@ class PhC_1x1(Device):
         fwidth = (
             3 * alpha * (1 / (wl_cen - wl_width / 2) - 1 / (wl_cen + wl_width / 2))
         )  # pulse frequency width
+        self.fcen = fcen
+        self.fwidth = fwidth
         if src_type == "GaussianSource":
             src_fn = mp.GaussianSource
         else:
@@ -246,6 +235,21 @@ class PhC_1x1(Device):
             )
         )
 
+    def update_permittivity(self, permittivity: torch.Tensor, box_size_x: float = 6, box_size_y: float = 5):
+        permittivity = permittivity.detach().cpu().numpy()
+        design_region_size = mp.Vector3(box_size_x, box_size_y, 0)
+        medium1 = mp.Medium(epsilon=self.config.device.cfg.eps_bg)
+        medium2 = mp.Medium(epsilon=self.config.device.cfg.eps_r)
+        design_variables = mp.MaterialGrid(
+            mp.Vector3(permittivity.shape[0], permittivity.shape[1]), 
+            medium1, 
+            medium2, 
+            weights=permittivity, 
+            grid_type="U_MEAN"
+        )
+        self.design_region = mpa.DesignRegion(design_variables, volume=mp.Volume(center=mp.Vector3(), size=design_region_size))
+        self.geometry = self.geometry + [mp.Block(center=mp.Vector3(), size=design_region_size, material=design_variables)]
+
     def create_simulation(
         self,
         resolution: int = 10,  # pixels / um
@@ -271,6 +275,7 @@ class PhC_1x1(Device):
             geometry=self.geometry,
             sources=self.sources,
             default_material=mp.Medium(epsilon=self.config.device.cfg.eps_bg),
+            force_all_components=True,
         )
         self.update_simulation_config(
             dict(
@@ -285,6 +290,34 @@ class PhC_1x1(Device):
             )
         )
         return self.sim
+
+    def create_objective(self, in_port_idx: int, out_port_idx: int):
+        te_out = mpa.EigenmodeCoefficient(
+            self.sim, mp.Volume(center=mp.Vector3(*self.out_port_centers[out_port_idx]), size=mp.Vector3(y=1.2)), mode=1
+        )
+        te_in = mpa.EigenmodeCoefficient(
+            self.sim, mp.Volume(center=mp.Vector3(*self.in_port_centers[in_port_idx]), size=mp.Vector3(y=1.2)), mode=1
+        )
+        self.ob_list = [te_in, te_out]
+
+    @staticmethod
+    def J(te_in, te_out):
+        return npa.abs(te_out / te_in) ** 2
+    
+    def create_optimzation(self):
+        self.opt = mpa.OptimizationProblem(
+            simulation=self.sim,
+            objective_functions=self.J,
+            objective_arguments=self.ob_list,
+            design_regions=self.design_region,
+            fcen=self.fcen,
+            df=0,
+            nf=1,
+        )
+
+    def obtain_objective_and_gradient(self):
+        f0, grad = self.opt()
+        return f0, grad
 
     def run_sim(
         self,
@@ -380,7 +413,7 @@ class PhC_1x1(Device):
             hf.create_dataset("meta", data=str(self.config))
 
         return output
-
+    
     def resize(self, x, size, mode="bilinear"):
         if not isinstance(x, torch.Tensor):
             y = torch.from_numpy(x)
@@ -458,68 +491,4 @@ class PhC_1x1(Device):
         str = f"Metaline{self.num_in_ports}x{self.num_out_ports}("
         str += f"size = {self.box_size[0]} um x {self.box_size[1]} um)"
         return str
-
-
-def phc_1x1_random(random_seed=0, radius=1, a=2):
-    np.random.seed(random_seed)
-    N = 1
-    wd = math.sqrt(3) * a
-    wphc = np.random.uniform(8, 12)
-    size = [19.8, wphc + wd]
-    port_len = 3
-
-    n_hole_per_row = int(size[0] // (a * math.sqrt(3) / 2))
-    n_rows = int(wphc // a + 1)
-    if n_rows % 2 != 0:  # n_rows must be even
-        n_rows = n_rows + 1
-
-    init_x_coordinate = (
-        size[0] - (a * math.sqrt(3) / 2) * (size[0] // (a * math.sqrt(3) / 2) - 1)
-    ) / 2
-    hole_centers_x = [
-        init_x_coordinate + i * a * math.sqrt(3) / 2 for i in range(n_hole_per_row)
-    ]
-    hole_centers_x = [x_coordinates - size[0] / 2 for x_coordinates in hole_centers_x]
-    hole_centers_y_top = [wd/2 + i * a for i in range(int(n_rows // 2))]
-    hole_centers_y_bottom = [-1 * item for item in hole_centers_y_top]
-    hole_centers_y = hole_centers_y_top + hole_centers_y_bottom
-    holes = []
-    for x in range(len(hole_centers_x)):
-        for y in range(len(hole_centers_y)):
-            if x % 2 == 1:
-                if hole_centers_y[y] < 0:
-                    holes.append((hole_centers_x[x], hole_centers_y[y] - a / 2, radius))
-                else:
-                    holes.append((hole_centers_x[x], hole_centers_y[y] + a / 2, radius))
-            else:
-                holes.append((hole_centers_x[x], hole_centers_y[y], radius))
-
-    phc = PhC_1x1(
-        N,
-        N,
-        box_size=size,  # box [length, width], um
-        wg_width=(wd, wd),  # in/out wavelength width, um
-        port_diff=(6 / N, 6 / N),  # distance between in/out waveguides. um
-        holes=holes,
-        port_len=port_len,  # length of in/out waveguide from PML to box. um
-        taper_width=wd,
-        taper_len=2,
-        eps_r=eps_si,
-        eps_bg=eps_sio2,
-    )
-    phc.add_source(0)
-    phc.create_simulation(
-        resolution=50,
-        stop_when_decay=False,
-        until=200,
-        border_width=[0, 1],
-        PML=[2, 2],
-        record_interval=0.3,
-    )
-    return phc
-
-
-if __name__ == "__main__":
-    device = phc_1x1_random(random_seed=0, radius=0.1, a=0.4)
-    device.run_sim(filepath="test_phc_1x1_50.h5", export_video=True)
-    device.dump_config("test_phc_1x1_50.yml")
+    

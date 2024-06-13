@@ -18,3 +18,4 @@ from .fourier_conv import *
 from .layer_norm import *
 from .large_kernel_conv import *
 from .pac import *
+from .phc_1x1_fdtd import *

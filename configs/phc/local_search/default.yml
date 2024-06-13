@@ -1,0 +1,83 @@
+criterion:
+  name: distanceLoss
+  max_distance: 0.15
+
+aux_criterion:
+  curl_loss:
+    weight: 0.0
+  tv_loss:
+    weight: 0.0
+    norm: False
+
+optimizer:
+  name: adamw
+  lr: 0.002
+  weight_decay: 0.000
+
+lr_scheduler:
+  name: cosine
+  lr_gamma: 0.99
+  lr_min: 0
+
+temp_scheduler:
+  name: temperature
+  lr: 0.1
+  lr_min: 1e-5
+
+run:
+  experiment: "default"
+  n_epochs: 100
+  use_cuda: 1
+  gpu_id: 0
+  deterministic: 1
+  random_state: 42
+  log_interval: 10
+
+quantize:
+  weight_bit: 32
+  input_bit: 32
+
+checkpoint:
+  save_best_model_k: 3
+  checkpoint_dir: "phc/local_search/train_local_search"
+  model_comment: ""
+  resume: 0
+  restore_checkpoint: ""
+  no_linear: 0
+
+model:
+  name: "Repara_PhC_1x1"
+  device_cfg:
+    num_in_ports: 1
+    num_out_ports: 1
+    box_size: [19.8, 9]
+    wg_width: (0.5, 0.5)
+    port_diff: (4, 4)
+    port_len: 3
+    taper_width: 1.7320508076
+    taper_len: 2
+    eps_r: eps_si
+    eps_bg: eps_sio2
+  sim_cfg:
+    resolution: 20
+    border_width: [0, 1]
+    PML: (2, 2)
+    record_interval: 0.3
+    store_fields: ["Ez"]
+    until: 250
+    stop_when_decay: False
+  purturbation: False
+  num_rows_perside: 11
+  num_cols: 30
+
+debug:
+  verbose: 1
+
+plot:
+  train: True
+  valid: True
+  test: True
+  interval: 10
+  root: plot
+  dir_name: default
+

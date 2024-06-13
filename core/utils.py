@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import torch.fft
 import random
+import math
 
 #################################################
 #
@@ -655,3 +656,39 @@ def plot_dynamics(
     # plt.tight_layout()
     plt.savefig(filepath, dpi=200)
     plt.close()
+
+class TemperatureScheduler:
+    def __init__(self, initial_T, final_T, total_steps):
+        self.initial_T = initial_T
+        self.final_T = final_T
+        self.total_steps = total_steps
+        self.current_step = 0
+
+    def step(self):
+        self.current_step += 1
+        if self.current_step > self.total_steps:
+            self.current_step = self.total_steps
+        cos_inner = (math.pi * self.current_step) / self.total_steps
+        cos_out = math.cos(cos_inner) + 1
+        self.current_T = self.final_T + 0.5 * (self.initial_T - self.final_T) * cos_out
+        return self.current_T
+
+    def get_temperature(self):
+        return self.current_T
+    
+class DistanceLoss(torch.nn.modules.loss._Loss):
+    def __init__(self, min_distance=0.15):
+        super(DistanceLoss, self).__init__()
+        self.min_distance = min_distance
+
+    def forward(self, hole_position):
+        hole_position = torch.flatten(hole_position, start_dim=0, end_dim=1)
+        distance = torch.zeros(hole_position.shape[0], hole_position.shape[0])
+        for i in range(hole_position.shape[0]):
+            for j in range(hole_position.shape[0]):
+                distance[i, j] = torch.norm(hole_position[i][:-1] - hole_position[j][:-1], p=2)
+        distance_penalty = distance - self.min_distance
+        distance_penalty = distance_penalty * (distance_penalty < 0)
+        distance_penalty = distance_penalty.sum()
+        distance_penalty = -1 * distance_penalty
+        return distance_penalty
