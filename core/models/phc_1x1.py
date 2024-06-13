@@ -95,20 +95,23 @@ class Repara_PhC_1x1(nn.Module):
         else:
             hole_position = self.hole_position[:, :, :2]
 
+        # TODO make this a module
         # Define grid
         x = torch.linspace(-self.box_size[0]/2, self.box_size[0]/2, int(self.box_size[0] * self.resolution) + 1)
         y = torch.linspace(-self.box_size[1]/2, self.box_size[1]/2, int(self.box_size[1] * self.resolution) + 1)
         X, Y = torch.meshgrid(x, y)
 
         Z = torch.zeros_like(X)
+        # TODO no for loop
         for i in range(hole_position.shape[0]):
             for j in range(hole_position.shape[1]):
                 Z += self.gaussian(X, Y, hole_position[i, j, 0], hole_position[i, j, 1], 1, self.hole_position[i, j, 2])
-
+        # TODO LSE to pick the max value, this is to approx the max value so that not too sparse
+        # wirelength to approx
         permittivity = Z
 
-        # normalize the permittivity with the maximum value
-        permittivity = permittivity / torch.max(permittivity)
+        # # normalize the permittivity with the maximum value
+        # permittivity = permittivity / torch.max(permittivity)
 
         # update device config with the new permittivity
         self.device_cfg['box_size'] = [int(self.box_size[0] * self.resolution)/self.resolution, int(self.box_size[1] * self.resolution)/self.resolution]
