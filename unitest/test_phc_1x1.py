@@ -156,7 +156,7 @@ def main():
         regression_loss = criterion(hole_position)
         loss = regression_loss
 
-    model.backward([loss])
+    model.backward(loss)
     grad_scaler.step(optimizer)
     grad_scaler.update()
     optimizer.zero_grad()

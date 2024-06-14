@@ -140,14 +140,13 @@ class Repara_PhC_1x1(nn.Module):
         f0, grad = device.obtain_objective_and_gradient()
         return f0, grad
     
-    def backward(self, loss_list):
+    def backward(self, loss):
         # Compute gradients of permittivity w.r.t. the design variables
         # design_vars = [self.hole_position, self.box_size]
         # TODO: how to optimze the box_size? it still look strange to me
         # if the gradient at point (x, y) is -1, it means that the permittivity at (x, y) should be decreased
         # but in which way the box_size should be changed accordingly?
-        for i in range(len(loss_list)):
-            loss_list[i].backward() # first compute and accumulate the gradient of the loss w.r.t. the design variables
+        loss.backward() # first compute and accumulate the gradient of the loss w.r.t. the design variables
         f0, grad_permittivity = self.calculate_objective_and_gradient(self.permittivity) # obtain the gradient of the objective w.r.t. the permittivity
 
         if isinstance(grad_permittivity, np.ndarray): # make sure the gradient is torch tensor
