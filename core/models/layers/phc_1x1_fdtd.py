@@ -93,10 +93,6 @@ class PhC_1x1(Device):
         num_out_ports: int,
         box_size: list[float, float],  # box [length, width], um
         wg_width: Tuple[float, float] = (0.4, 0.4),  # in/out wavelength width, um
-        port_diff: Tuple[float, float] = (
-            4,
-            4,
-        ),  # distance between in/out waveguides. um
         holes: Optional[Tuple[int, int]] = [],  # [(center_x, center_y, size_x, size_y)]
         port_len: float = 10,  # length of in/out waveguide from PML to box. um
         taper_width: float = 0.0,  # taper width near the multi-mode region. um. Default to 0
@@ -128,7 +124,6 @@ class PhC_1x1(Device):
             holes=str(holes),
             box_size=box_size,
             wg_width=wg_width,
-            port_diff=port_diff,
             port_len=port_len,
             taper_width=taper_width,
             taper_len=taper_len,
@@ -150,7 +145,7 @@ class PhC_1x1(Device):
                 length_taper=taper_len,
                 center=(
                     -box_size[0] / 2 - taper_len / 2,
-                    (i - (num_in_ports - 1) / 2) * port_diff[0],
+                    0,
                 ),
                 medium=mp.Medium(epsilon=eps_r),
             )
@@ -166,7 +161,7 @@ class PhC_1x1(Device):
                 length_taper=taper_len,
                 center=(
                     box_size[0] / 2 + taper_len / 2,
-                    (i - (num_out_ports - 1) / 2) * port_diff[0],
+                    0,
                 ),
                 medium=mp.Medium(epsilon=eps_r),
             )
@@ -177,7 +172,7 @@ class PhC_1x1(Device):
         self.in_port_centers = [
             (
                 -box_size[0] / 2 - 0.98 * port_len,
-                (i - (num_in_ports - 1) / 2) * port_diff[0],
+                0,
             )
             for i in range(num_in_ports)
         ]  # centers
@@ -185,7 +180,7 @@ class PhC_1x1(Device):
         self.out_port_centers = [
             (
                 box_size[0] / 2 + 0.98 * port_len,
-                (float(i) - float(num_out_ports - 1) / 2.0) * port_diff[1],
+                0,
             )
             for i in range(num_out_ports)
         ]  # centers

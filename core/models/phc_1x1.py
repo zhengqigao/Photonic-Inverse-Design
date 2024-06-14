@@ -160,8 +160,7 @@ class Repara_PhC_1x1(nn.Module):
         # grad_permittivity = torch.randn(self.permittivity_tensor_size) # for test
 
         design_vars = [self.hole_position]
-        output = self.build_permittivity(backward=True)
-        grad_latent = torch.autograd.grad(outputs=output, inputs=design_vars, grad_outputs=grad_permittivity, allow_unused=True)
+        grad_latent = torch.autograd.grad(outputs=self.permittivity, inputs=design_vars, grad_outputs=grad_permittivity, allow_unused=True)
 
         # Assign the gradients back to the design variables
         for var, grad in zip(design_vars, grad_latent):
