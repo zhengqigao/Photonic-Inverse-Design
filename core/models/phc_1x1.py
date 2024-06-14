@@ -132,7 +132,7 @@ class Repara_PhC_1x1(nn.Module):
 
     def _calculate_objective_and_gradient_fdtd(self, permittivity):
         device = PhC_1x1(**self.device_cfg)
-        device.update_permittivity(permittivity, self.device_cfg["box_size"][0], self.device_cfg["box_size"][1])
+        device.update_permittivity(permittivity)
         device.add_source(0)
         device.create_simulation(**self.sim_cfg)
         device.create_objective(0, 0)
@@ -173,37 +173,10 @@ class Repara_PhC_1x1(nn.Module):
         permittivity = self.build_permittivity() # update the permittivity and change the device config that fits the permittivity size
         self.permittivity = self.binarize_projection(permittivity, T)
         return self.hole_position
-
-if __name__ == "__main__":
-    init_device_cfg = dict(
-        num_in_ports = 1,
-        num_out_ports = 1,
-        box_size = [19.8, 12],
-        wg_width = (1.7320508076, 1.7320508076),
-        port_diff = (4, 4),
-        port_len = 3,
-        taper_width = 1.7320508076,
-        taper_len = 2,
-        eps_r = 12.1104,
-        eps_bg = 2.0736,
-    )
-    sim_cfg = dict(
-        resolution = 20,
-        border_width = [0, 1],
-        PML = (2, 2),
-        record_interval = 0.3,
-        store_fields = ['Ez'],
-        until = 250,
-        stop_when_decay = False,
-    )
-    model = Repara_PhC_1x1(
-            device_cfg=init_device_cfg, 
-            sim_cfg=sim_cfg, 
-            purturbation=False,
-            num_rows_perside=6,
-            num_cols=8,
-        )
-    f0, grad, hole_position = model(0.01)
-    print(f0)
-    print(grad)
-    model.backward(grad)
+    
+    def test_adjoint(self):
+        print("this is self.device_cfg: \n", self.device_cfg)
+        print("this is self.sim_cfg: \n", self.sim_cfg)
+        f0, grad_permittivity = self.calculate_objective_and_gradient(self.permittivity) # obtain the gradient of the objective w.r.t. the permittivity
+        print("this is the gradient of the permittivity: ", grad_permittivity)
+        print("this is the f0: ", f0)

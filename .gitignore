@@ -148,3 +148,6 @@ dmypy.json
 
 # ignore all .png files
 *.png
+
+train_bk_0.py
+train_multi_step_bk_0.py

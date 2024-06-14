@@ -52,7 +52,6 @@ model:
     num_out_ports: 1
     box_size: [19.8, 9]
     wg_width: (0.5, 0.5)
-    port_diff: (4, 4)
     port_len: 3
     taper_width: 1.7320508076
     taper_len: 2

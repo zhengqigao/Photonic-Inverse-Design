@@ -83,6 +83,7 @@ def get_taper(
         height=mp.inf,
         material=medium,
     )
+    print("this is the taper vertices", taper_vertices)
     return taper
 
 
@@ -135,6 +136,8 @@ class PhC_1x1(Device):
         self.update_device_config("PhC_1x1", device_cfg)
 
         self.size = [box_size[0] + port_len * 2, box_size[1]]
+        self.box_size = box_size
+        print("this is the box size", self.box_size)
 
         in_ports = [
             get_taper(
@@ -230,11 +233,13 @@ class PhC_1x1(Device):
             )
         )
 
-    def update_permittivity(self, permittivity: torch.Tensor, box_size_x: float = 6, box_size_y: float = 5):
+    def update_permittivity(self, permittivity: torch.Tensor):
         permittivity = permittivity.detach().cpu().numpy()
-        design_region_size = mp.Vector3(box_size_x, box_size_y, 0)
+        design_region_size = mp.Vector3(self.box_size[0], self.box_size[1], 0)
+        print("this is the design region size", design_region_size)
         medium1 = mp.Medium(epsilon=self.config.device.cfg.eps_bg)
         medium2 = mp.Medium(epsilon=self.config.device.cfg.eps_r)
+        print("this is the shape of permittivity", permittivity.shape)
         design_variables = mp.MaterialGrid(
             mp.Vector3(permittivity.shape[0], permittivity.shape[1]), 
             medium1, 
@@ -242,8 +247,11 @@ class PhC_1x1(Device):
             weights=permittivity, 
             grid_type="U_MEAN"
         )
-        self.design_region = mpa.DesignRegion(design_variables, volume=mp.Volume(center=mp.Vector3(), size=design_region_size))
-        self.geometry = self.geometry + [mp.Block(center=mp.Vector3(), size=design_region_size, material=design_variables)]
+        self.design_region = mpa.DesignRegion(
+            design_variables, 
+            volume=mp.Volume(center=mp.Vector3(), size=design_region_size)
+        )
+        self.geometry = self.geometry + [mp.Block(center=self.design_region.center, size=self.design_region.size, material=design_variables)]
 
     def create_simulation(
         self,
@@ -263,6 +271,7 @@ class PhC_1x1(Device):
         sx = PML[0] * 2 + self.size[0] + border_width[0] * 2
         sy = PML[1] * 2 + self.size[1] + border_width[1] * 2
         cell_size = (sx, sy, 0)
+        print("this is the cell size", cell_size)
         self.sim = mp.Simulation(
             resolution=resolution,
             cell_size=mp.Vector3(*cell_size),
@@ -290,19 +299,23 @@ class PhC_1x1(Device):
         te_out = mpa.EigenmodeCoefficient(
             self.sim, mp.Volume(center=mp.Vector3(*self.out_port_centers[out_port_idx]), size=mp.Vector3(y=1.2)), mode=1
         )
-        te_in = mpa.EigenmodeCoefficient(
-            self.sim, mp.Volume(center=mp.Vector3(*self.in_port_centers[in_port_idx]), size=mp.Vector3(y=1.2)), mode=1
-        )
-        self.ob_list = [te_in, te_out]
+        # te_in = mpa.EigenmodeCoefficient(
+        #     self.sim, mp.Volume(center=mp.Vector3(*self.in_port_centers[in_port_idx]), size=mp.Vector3(y=1.2)), mode=1
+        # )
+        # self.ob_list = [te_in, te_out]
+        self.ob_list = [te_out]
 
+    # @staticmethod
+    # def J(te_in, te_out):
+    #     return npa.abs(te_out / te_in) ** 2
     @staticmethod
-    def J(te_in, te_out):
-        return npa.abs(te_out / te_in) ** 2
+    def J(te_out):
+        return npa.abs(te_out) ** 2
     
     def create_optimzation(self):
         self.opt = mpa.OptimizationProblem(
             simulation=self.sim,
-            objective_functions=self.J,
+            objective_functions=[self.J],
             objective_arguments=self.ob_list,
             design_regions=self.design_region,
             fcen=self.fcen,
@@ -487,3 +500,31 @@ class PhC_1x1(Device):
         str += f"size = {self.box_size[0]} um x {self.box_size[1]} um)"
         return str
     
+if __name__ == "__main__":
+    permittivity = torch.randn((201, 201))
+    device = PhC_1x1(
+            num_in_ports=1,
+            num_out_ports=1,
+            box_size=[10, 10],
+            wg_width=(1.7320508076, 1.7320508076),
+            port_len=3,
+            taper_width=1.7320508076,
+            taper_len=2,
+            eps_r=eps_si,
+            eps_bg=eps_sio2,
+        )
+    device.update_permittivity(permittivity)
+    device.add_source(0)
+    device.create_simulation(
+        resolution=20,
+        border_width=[0, 1],
+        PML=(2, 2),
+        record_interval=0.3,
+        store_fields=["Ez"],
+        until=250,
+        stop_when_decay=False,
+    )
+    device.create_objective(0, 0)
+    device.create_optimzation()
+    f0, grad = device.obtain_objective_and_gradient()
+    print(f0, grad)
