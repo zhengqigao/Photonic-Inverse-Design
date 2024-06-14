@@ -12,9 +12,6 @@ from torch.types import Device
 from torch.utils.data import Sampler
 import random
 
-from core.datasets import (
-    FDTDDataset,
-)
 from core.models import *
 
 from .utils import (
@@ -244,27 +241,7 @@ def make_dataloader(
 ) -> Tuple[DataLoader, DataLoader]:
     name = (name or configs.dataset.name).lower()
     if name == "fdtd":
-        train_dataset, validation_dataset, test_dataset = (
-            (
-                FDTDDataset(
-                    root=configs.dataset.root,
-                    device_list=configs.dataset.device_list,
-                    split=split,
-                    test_ratio=configs.dataset.test_ratio,
-                    train_valid_split_ratio=configs.dataset.train_valid_split_ratio,
-                    processed_dir=configs.dataset.processed_dir,
-                    in_frames=configs.dataset.in_frames,
-                    out_frames=configs.dataset.out_frames,
-                    offset_frames=configs.dataset.offset_frames,
-                    img_size=configs.dataset.img_height,
-                    mixup_cfg=configs.dataset.augment if split == "train" else None,
-                    batch_strategy=configs.dataset.batch_strategy,
-                )
-                if split in splits
-                else None
-            )
-            for split in ["train", "valid", "test"]
-        )
+        pass
     else:
         train_dataset, test_dataset = get_dataset(
             name,

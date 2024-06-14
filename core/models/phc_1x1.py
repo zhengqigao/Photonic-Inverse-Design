@@ -6,7 +6,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
-from layers.phc_1x1_fdtd import PhC_1x1
+from .layers.phc_1x1_fdtd import PhC_1x1
 # Determine the path to the directory containing device.py
 device_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/fdtd'))
 
@@ -50,9 +50,6 @@ class Repara_PhC_1x1(nn.Module):
             if type(self.sim_cfg[key]) == str:
                 self.sim_cfg[key] = eval(self.sim_cfg[key])
         self.resolution = sim_cfg["resolution"]
-        self.build_permittivity()
-        print("this is the device config: ", self.device_cfg)
-        print("this is the sim config: ", self.sim_cfg)
 
     def init_parameters(self):
         self.wd = torch.sqrt(torch.tensor(3)) # one is the mean and the other is the std
@@ -143,18 +140,31 @@ class Repara_PhC_1x1(nn.Module):
         f0, grad = device.obtain_objective_and_gradient()
         return f0, grad
     
-    def backward(self, permittivity_grad):
+    def backward(self, loss_list):
         # Compute gradients of permittivity w.r.t. the design variables
         # design_vars = [self.hole_position, self.box_size]
         # TODO: how to optimze the box_size? it still look strange to me
         # if the gradient at point (x, y) is -1, it means that the permittivity at (x, y) should be decreased
         # but in which way the box_size should be changed accordingly?
+        for i in range(len(loss_list)):
+            loss_list[i].backward() # first compute and accumulate the gradient of the loss w.r.t. the design variables
+        f0, grad_permittivity = self.calculate_objective_and_gradient(self.permittivity) # obtain the gradient of the objective w.r.t. the permittivity
+
+        if isinstance(grad_permittivity, np.ndarray): # make sure the gradient is torch tensor
+            grad_permittivity = torch.tensor(grad_permittivity, dtype=torch.float32)
+
+        if len(grad_permittivity.shape) == 2: # summarize the gradient along different frquencies
+            grad_permittivity = torch.sum(grad_permittivity, dim=-1)
+
+        grad_permittivity = grad_permittivity.view(*self.permittivity.shape) # reshape the gradient to the shape of the permittivity
+        # grad_permittivity = torch.randn(self.permittivity_tensor_size) # for test
+
         design_vars = [self.hole_position]
         output = self.build_permittivity(backward=True)
-        grad_permittivity = torch.autograd.grad(outputs=output, inputs=design_vars, grad_outputs=permittivity_grad, allow_unused=True)
+        grad_latent = torch.autograd.grad(outputs=output, inputs=design_vars, grad_outputs=grad_permittivity, allow_unused=True)
 
         # Assign the gradients back to the design variables
-        for var, grad in zip(design_vars, grad_permittivity):
+        for var, grad in zip(design_vars, grad_latent):
             if var.grad is None:
                 var.grad = grad
             else:
@@ -163,17 +173,8 @@ class Repara_PhC_1x1(nn.Module):
 
     def forward(self, T):
         permittivity = self.build_permittivity() # update the permittivity and change the device config that fits the permittivity size
-        permittivity = self.binarize_projection(permittivity, T)
-        f0, grad = self.calculate_objective_and_gradient(permittivity)
-        
-        if isinstance(grad, np.ndarray): # make sure the gradient is torch tensor
-            grad = torch.tensor(grad, dtype=torch.float32)
-        
-        if len(grad.shape) == 2: # summarize the gradient along different frquencies
-            grad = torch.sum(grad, dim=-1)
-
-        grad = grad.view(*self.permittivity_tensor_size)
-        return f0, grad, self.hole_position
+        self.permittivity = self.binarize_projection(permittivity, T)
+        return self.hole_position
 
 if __name__ == "__main__":
     init_device_cfg = dict(

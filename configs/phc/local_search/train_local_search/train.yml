@@ -60,7 +60,7 @@ model:
   device_cfg:
     num_in_ports: 1
     num_out_ports: 1
-    box_size: [19.8, 12]
+    box_size: [10, 10]
     wg_width: (1.7320508076, 1.7320508076)
     port_diff: (4, 4)
     port_len: 3

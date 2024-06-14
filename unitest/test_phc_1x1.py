@@ -148,18 +148,18 @@ def main():
 
     lossv = [0]
 
-    train_phc(
-        model=model,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        temp_scheduler=temp_scheduler,
-        epoch=1,
-        criterion=criterion,
-        lossv=lossv,
-        device=device,
-        plot=configs.plot.train,
-        grad_scaler=grad_scaler,
-    )
+    model.train()
+
+    with amp.autocast(enabled=grad_scaler._enabled):
+        temp = temp_scheduler.step()
+        hole_position = model(temp)
+        regression_loss = criterion(hole_position)
+        loss = regression_loss
+
+    model.backward([loss])
+    grad_scaler.step(optimizer)
+    grad_scaler.update()
+    optimizer.zero_grad()
 
 if __name__ == "__main__":
     main()
